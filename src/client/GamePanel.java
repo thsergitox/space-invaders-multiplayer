@@ -63,21 +63,6 @@ public class GamePanel extends JPanel implements ActionListener {
 
     // --- Inner Classes ---
     // Projectile class (can be used for player and invaders)
-    private static class Projectile {
-        int x, y;
-        boolean active = true;
-        // Optional: type (PLAYER, INVADER)
-
-        Projectile(int x, int y) {
-            this.x = x;
-            this.y = y;
-        }
-
-        Rectangle getBounds(int charWidth, int charHeight) {
-            // Simple bounds for single character projectile
-            return new Rectangle(x, y - charHeight, charWidth, charHeight); // y adjusted because drawString draws at baseline
-        }
-    }
 
     // Simple Invader class
     private static class Invader {
