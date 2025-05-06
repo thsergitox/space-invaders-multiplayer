@@ -19,6 +19,12 @@ This project is a networked multiplayer version of the classic Space Invaders ga
     *   [Common Data Structures](#common-data-structures)
 7.  [Game Logic Flow](#game-logic-flow)
 8.  [Key Classes and Their Purpose](#key-classes-and-their-purpose)
+9.  [Diagrams](#diagrams)
+    *   [Component Diagram](#component-diagram)
+    *   [Simplified Class Diagram](#simplified-class-diagram)
+    *   [Client-Server Interaction Sequence Diagram](#client-server-interaction-sequence-diagram)
+    *   [Server-Side Threading Model](#server-side-threading-model)
+    *   [Client-Side Threading Model](#client-side-threading-model)
 
 ## Overview
 
@@ -216,5 +222,243 @@ These classes, located in the `common` package, define the contract for data exc
     *   **Problem Solved**: Encapsulates all relevant information about a single player for easy transmission and state management.
 *   **`common.Constants`**: A utility class holding static final values for game parameters (e.g., speeds, dimensions, points).
     *   **Problem Solved**: Promotes code readability, maintainability, and consistency by centralizing configurable game values.
+
+## Diagrams
+
+Below are several diagrams to help visualize the project structure and interactions. These are represented using Mermaid.js syntax and should render on platforms like GitHub.
+
+### Component Diagram
+
+This diagram shows the high-level components and their dependencies.
+
+```mermaid
+graph TD
+    subgraph ClientTier[Client Application]
+        C_GamePanel[GamePanel]
+        C_GameWindow[GameWindow]
+        C_ServerListener[ServerListener]
+    end
+
+    subgraph ServerTier[Server Application]
+        S_GameServer[GameServer]
+        S_ClientHandler[ClientHandler]
+    end
+
+    subgraph CommonLib[Common Library]
+        CO_Constants[Constants]
+        CO_GameStateUpdate[GameStateUpdate]
+        CO_PlayerAction[PlayerAction]
+        CO_PlayerState[PlayerState]
+    end
+
+    C_GamePanel --> S_GameServer
+    C_GamePanel -- Uses --> CO_PlayerAction
+    C_GamePanel -- Uses --> CO_GameStateUpdate
+    C_GamePanel -- Uses --> CO_Constants
+    C_GamePanel -- Contains --> C_ServerListener
+
+    S_GameServer -- Manages --> S_ClientHandler
+    S_GameServer -- Uses --> CO_GameStateUpdate
+    S_GameServer -- Uses --> CO_PlayerAction
+    S_GameServer -- Uses --> CO_PlayerState
+    S_GameServer -- Uses --> CO_Constants
+
+    S_ClientHandler -- Uses --> CO_PlayerAction
+    S_ClientHandler -- Uses --> CO_GameStateUpdate
+
+    style ClientTier fill:#ccf,stroke:#333,stroke-width:2px
+    style ServerTier fill:#fcc,stroke:#333,stroke-width:2px
+    style CommonLib fill:#cfc,stroke:#333,stroke-width:2px
+```
+
+### Simplified Class Diagram
+
+This diagram outlines the key classes and their relationships.
+
+```mermaid
+classDiagram
+    class GamePanel {
+        +latestGameState: GameStateUpdate
+        +myPlayerId: int
+        +serverListenerThread: Thread
+        +connectToServer()
+        +sendPlayerAction(PlayerAction)
+        +paintComponent(Graphics)
+        +ServerListener (inner class)
+    }
+    class ServerListener {
+        +run()
+    }
+    GamePanel "1" *-- "1" ServerListener : contains
+
+    class GameServer {
+        -clients: Map~Integer, ClientHandler~
+        -gameState: GameStateUpdate
+        -gameLoopThread: Thread
+        +start()
+        +broadcastGameState()
+        +handlePlayerAction(PlayerAction)
+        +gameLoop()
+    }
+    class ClientHandler {
+        -socket: Socket
+        -out: ObjectOutputStream
+        -in: ObjectInputStream
+        -playerId: int
+        +run()
+        +sendGameState(GameStateUpdate)
+        +receivePlayerAction(): PlayerAction
+    }
+    GameServer "1" *-- "N" ClientHandler : manages
+
+    class GameStateUpdate {
+        +players: Map~Integer, PlayerState~
+        +invaders: List~Point~
+        +projectiles: List~Point~
+        +isGameOver: boolean
+        +isPaused: boolean
+    }
+    class PlayerAction {
+        +actionType: ActionType
+        +playerId: int
+    }
+    class PlayerState {
+        +playerId: int
+        +x: int
+        +y: int
+        +score: int
+        +lives: int
+        +isAlive: boolean
+    }
+    class Constants {
+        +static final int SCREEN_WIDTH
+        +static final int SCREEN_HEIGHT
+    }
+
+    GamePanel ..> GameStateUpdate : uses
+    GamePanel ..> PlayerAction : uses
+    GamePanel ..> Constants : uses
+
+    GameServer ..> GameStateUpdate : creates/updates
+    GameServer ..> PlayerAction : handles
+    GameServer ..> PlayerState : manages
+    GameServer ..> Constants : uses
+
+    ClientHandler ..> GameStateUpdate : sends
+    ClientHandler ..> PlayerAction : receives
+
+    GameStateUpdate o-- PlayerState : contains
+```
+
+### Client-Server Interaction Sequence Diagram
+
+This diagram illustrates the typical communication flow between a client and the server.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant GamePanel
+    participant ServerListenerThread
+    participant Server
+    participant ClientHandlerThread
+    participant GameLoopThread
+
+    Client->>GamePanel: User Input (e.g., press SHOOT)
+    GamePanel->>GamePanel: Create PlayerAction
+    GamePanel->>Server: Send PlayerAction (via ObjectOutputStream)
+    Server->>ClientHandlerThread: Receive PlayerAction
+    ClientHandlerThread->>GameServer: Forward PlayerAction
+    GameServer->>GameLoopThread: Process PlayerAction (e.g., create projectile)
+
+    Note over GameLoopThread: Update game state, check collisions, etc.
+
+    GameLoopThread->>GameServer: Game state updated
+    GameServer->>GameLoopThread: Create GameStateUpdate
+    GameLoopThread->>ClientHandlerThread: Broadcast GameStateUpdate to all clients
+    ClientHandlerThread->>ServerListenerThread: Send GameStateUpdate (via ObjectOutputStream)
+    ServerListenerThread->>GamePanel: Update local game state (latestGameState)
+    GamePanel->>GamePanel: repaint()
+```
+
+### Server-Side Threading Model
+
+This diagram shows how different threads operate on the server side.
+
+```mermaid
+graph TD
+    subgraph ServerProcess [Java Server Process]
+        MainServerThread[Main Server Thread (ServerSocket Accept Loop)]
+        GameLogicThread[Game Logic Thread (GameServer.gameLoop)]
+        ExecutorService[Client Handler Thread Pool (ExecutorService)]
+
+        subgraph ClientConnections [Individual Client Connections]
+            ClientHandlerThread1[ClientHandler Thread 1]
+            ClientHandlerThread2[ClientHandler Thread 2]
+            ClientHandlerThreadN[ClientHandler Thread N...]
+        end
+
+        SharedGameState[Shared Game State (ConcurrentHashMap, CopyOnWriteArrayList etc.)]
+    end
+
+    MainServerThread -- Creates & Submits --> ExecutorService
+    ExecutorService -- Spawns --> ClientHandlerThread1
+    ExecutorService -- Spawns --> ClientHandlerThread2
+    ExecutorService -- Spawns --> ClientHandlerThreadN
+
+    ClientHandlerThread1 -- Reads/Writes --> SharedGameState
+    ClientHandlerThread2 -- Reads/Writes --> SharedGameState
+    ClientHandlerThreadN -- Reads/Writes --> SharedGameState
+    GameLogicThread -- Reads/Writes --> SharedGameState
+
+    GameLogicThread -- Initiates Broadcast via --> ClientHandlerThread1
+    GameLogicThread -- Initiates Broadcast via --> ClientHandlerThread2
+    GameLogicThread -- Initiates Broadcast via --> ClientHandlerThreadN
+
+    ClientHandlerThread1 -- Receives PlayerAction --> GameLogicThread
+    ClientHandlerThread2 -- Receives PlayerAction --> GameLogicThread
+    ClientHandlerThreadN -- Receives PlayerAction --> GameLogicThread
+
+
+    style ServerProcess fill:#ffe0e0,stroke:#333,stroke-width:2px
+    style SharedGameState fill:#e0e0ff,stroke:#333,stroke-width:1px,color:#000
+```
+**Description:**
+*   **Main Server Thread:** Accepts new client connections and hands them off to the `ExecutorService`.
+*   **ExecutorService:** Manages a pool of threads, creating a new `ClientHandler` thread for each connected client.
+*   **ClientHandler Threads:** Each thread handles I/O (reading `PlayerAction`s, writing `GameStateUpdate`s) for a single client. They interact with the `SharedGameState` (e.g., to enqueue actions).
+*   **Game Logic Thread:** Runs the main `gameLoop`. It updates the `SharedGameState` based on game rules and player actions, and then triggers the `ClientHandler` threads to broadcast the new `GameStateUpdate`.
+*   **Shared Game State:** Data structures (like `ConcurrentHashMap`, `CopyOnWriteArrayList`) that are accessed by multiple threads. Synchronization mechanisms are crucial here.
+
+### Client-Side Threading Model
+
+This diagram illustrates the threading model on the client side.
+
+```mermaid
+graph TD
+    subgraph ClientProcess [Java Client Process]
+        EDT[Event Dispatch Thread (Swing UI Thread)]
+        ServerListenerThread[ServerListener Thread]
+        LocalGameState[Local Game State (e.g., latestGameState in GamePanel)]
+    end
+
+    EDT -- Handles --> UserInput[User Input (Keyboard, Mouse)]
+    UserInput -- Triggers Action --> EDT
+    EDT -- Creates & Sends --> PlayerActionToServer[PlayerAction to Server]
+
+    ServerListenerThread -- Receives --> GameStateFromServer[GameStateUpdate from Server]
+    GameStateFromServer -- Updates --> LocalGameState
+    LocalGameState -- Used by --> EDT # For Rendering
+    EDT -- Calls --> GamePanelPaint[GamePanel.paintComponent()]
+
+
+    EDT -- Starts --> ServerListenerThread
+
+    style ClientProcess fill:#e0ffee,stroke:#333,stroke-width:2px
+    style LocalGameState fill:#e0e0ff,stroke:#333,stroke-width:1px,color:#000
+```
+**Description:**
+*   **Event Dispatch Thread (EDT):** The main thread for Swing UI operations. It handles user input, creates `PlayerAction` objects to send to the server, and is responsible for rendering the game by calling `paintComponent()` on the `GamePanel`.
+*   **ServerListener Thread:** A dedicated thread that continuously listens for incoming messages (primarily `GameStateUpdate` objects) from the server.
+*   **Local Game State:** Data structures within `GamePanel` (like `latestGameState`) that hold the client's copy of the game state. The `ServerListenerThread` updates this state, and the `EDT` reads from it for rendering. This separation prevents the UI from freezing while waiting for network data.
 
 This project demonstrates a robust client-server architecture for a real-time multiplayer game, leveraging Java's networking and concurrency features effectively.
