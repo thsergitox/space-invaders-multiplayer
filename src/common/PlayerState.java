@@ -13,12 +13,6 @@ public class PlayerState implements Serializable {
     public boolean alive = true;
     // Add other relevant per-player state if needed (e.g., isShooting flag?)
 
-    // --- Server-Side Movement State --- (Not necessarily sent to clients unless needed)
-    // Transient keyword prevents these fields from being serialized and sent to clients
-    public transient boolean movingLeft = false;
-    public transient boolean movingRight = false;
-    // Could add velocity here instead if preferred
-
     public PlayerState(int id, int x, int y, int score, int lives) {
         this.id = id;
         this.x = x;
@@ -36,8 +30,6 @@ public class PlayerState implements Serializable {
                 ", score=" + score +
                 ", lives=" + lives +
                 ", alive=" + alive +
-                ", movingLeft=" + movingLeft +
-                ", movingRight=" + movingRight +
                 '}';
     }
 } 
