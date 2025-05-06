@@ -231,154 +231,19 @@ Below are several diagrams to help visualize the project structure and interacti
 
 This diagram shows the high-level components and their dependencies.
 
-```mermaid
-graph TD
-    subgraph ClientTier[Client Application]
-        C_GamePanel[GamePanel]
-        C_GameWindow[GameWindow]
-        C_ServerListener[ServerListener]
-    end
-
-    subgraph ServerTier[Server Application]
-        S_GameServer[GameServer]
-        S_ClientHandler[ClientHandler]
-    end
-
-    subgraph CommonLib[Common Library]
-        CO_Constants[Constants]
-        CO_GameStateUpdate[GameStateUpdate]
-        CO_PlayerAction[PlayerAction]
-        CO_PlayerState[PlayerState]
-    end
-
-    C_GamePanel --> S_GameServer
-    C_GamePanel -- Uses --> CO_PlayerAction
-    C_GamePanel -- Uses --> CO_GameStateUpdate
-    C_GamePanel -- Uses --> CO_Constants
-    C_GamePanel -- Contains --> C_ServerListener
-
-    S_GameServer -- Manages --> S_ClientHandler
-    S_GameServer -- Uses --> CO_GameStateUpdate
-    S_GameServer -- Uses --> CO_PlayerAction
-    S_GameServer -- Uses --> CO_PlayerState
-    S_GameServer -- Uses --> CO_Constants
-
-    S_ClientHandler -- Uses --> CO_PlayerAction
-    S_ClientHandler -- Uses --> CO_GameStateUpdate
-
-    style ClientTier fill:#ccf,stroke:#333,stroke-width:2px
-    style ServerTier fill:#fcc,stroke:#333,stroke-width:2px
-    style CommonLib fill:#cfc,stroke:#333,stroke-width:2px
-```
+![](https://i.imgur.com/qcU18ra.png)
 
 ### Simplified Class Diagram
 
 This diagram outlines the key classes and their relationships.
 
-```mermaid
-classDiagram
-    class GamePanel {
-        +latestGameState: GameStateUpdate
-        +myPlayerId: int
-        +serverListenerThread: Thread
-        +connectToServer()
-        +sendPlayerAction(PlayerAction)
-        +paintComponent(Graphics)
-        +ServerListener (inner class)
-    }
-    class ServerListener {
-        +run()
-    }
-    GamePanel "1" *-- "1" ServerListener : contains
-
-    class GameServer {
-        -clients: Map~Integer, ClientHandler~
-        -gameState: GameStateUpdate
-        -gameLoopThread: Thread
-        +start()
-        +broadcastGameState()
-        +handlePlayerAction(PlayerAction)
-        +gameLoop()
-    }
-    class ClientHandler {
-        -socket: Socket
-        -out: ObjectOutputStream
-        -in: ObjectInputStream
-        -playerId: int
-        +run()
-        +sendGameState(GameStateUpdate)
-        +receivePlayerAction(): PlayerAction
-    }
-    GameServer "1" *-- "N" ClientHandler : manages
-
-    class GameStateUpdate {
-        +players: Map~Integer, PlayerState~
-        +invaders: List~Point~
-        +projectiles: List~Point~
-        +isGameOver: boolean
-        +isPaused: boolean
-    }
-    class PlayerAction {
-        +actionType: ActionType
-        +playerId: int
-    }
-    class PlayerState {
-        +playerId: int
-        +x: int
-        +y: int
-        +score: int
-        +lives: int
-        +isAlive: boolean
-    }
-    class Constants {
-        +static final int SCREEN_WIDTH
-        +static final int SCREEN_HEIGHT
-    }
-
-    GamePanel ..> GameStateUpdate : uses
-    GamePanel ..> PlayerAction : uses
-    GamePanel ..> Constants : uses
-
-    GameServer ..> GameStateUpdate : creates/updates
-    GameServer ..> PlayerAction : handles
-    GameServer ..> PlayerState : manages
-    GameServer ..> Constants : uses
-
-    ClientHandler ..> GameStateUpdate : sends
-    ClientHandler ..> PlayerAction : receives
-
-    GameStateUpdate o-- PlayerState : contains
-```
+![](https://i.imgur.com/iCCPNja.png)
 
 ### Client-Server Interaction Sequence Diagram
 
 This diagram illustrates the typical communication flow between a client and the server.
 
-```mermaid
-sequenceDiagram
-    participant Client
-    participant GamePanel
-    participant ServerListenerThread
-    participant Server
-    participant ClientHandlerThread
-    participant GameLoopThread
-
-    Client->>GamePanel: User Input (e.g., press SHOOT)
-    GamePanel->>GamePanel: Create PlayerAction
-    GamePanel->>Server: Send PlayerAction (via ObjectOutputStream)
-    Server->>ClientHandlerThread: Receive PlayerAction
-    ClientHandlerThread->>GameServer: Forward PlayerAction
-    GameServer->>GameLoopThread: Process PlayerAction (e.g., create projectile)
-
-    Note over GameLoopThread: Update game state, check collisions, etc.
-
-    GameLoopThread->>GameServer: Game state updated
-    GameServer->>GameLoopThread: Create GameStateUpdate
-    GameLoopThread->>ClientHandlerThread: Broadcast GameStateUpdate to all clients
-    ClientHandlerThread->>ServerListenerThread: Send GameStateUpdate (via ObjectOutputStream)
-    ServerListenerThread->>GamePanel: Update local game state (latestGameState)
-    GamePanel->>GamePanel: repaint()
-```
+![](https://i.imgur.com/07Wm3QM.png)
 
 ### Server-Side Threading Model
 
