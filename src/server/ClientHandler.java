@@ -2,13 +2,11 @@ package server;
 
 import common.GameStateUpdate;
 import common.PlayerAction;
-import common.PlayerState;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.net.Socket;
-import java.util.Map;
 
 // Handles communication with a single client
 public class ClientHandler implements Runnable {

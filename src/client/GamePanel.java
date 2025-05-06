@@ -6,11 +6,6 @@ import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Random;
-import java.util.concurrent.CopyOnWriteArrayList; // Use thread-safe list for concurrent modification
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
@@ -50,26 +45,6 @@ public class GamePanel extends JPanel implements ActionListener {
     private boolean movingLeft = false; // Still used for sending actions
     private boolean movingRight = false;
 
-    // Player
-    private int playerX;
-    private int playerY;
-
-    // Player Projectiles (Changed to List)
-    private List<Projectile> playerProjectiles;
-
-    // Invaders
-    private List<Invader> invaders;
-    private float invaderSpeedX = Constants.INVADER_INITIAL_SPEED_PX_PER_SEC;
-    private int invaderDirection = 1; // 1 for right, -1 for left
-    private boolean invadersNeedToDrop = false;
-    private long lastInvaderMoveTime = 0;
-
-    // Invader Projectiles
-    private List<Projectile> invaderProjectiles;
-    private Random random = new Random();
-
-    // Barriers (Placeholders for now)
-    private List<Barrier> barriers;
 
     // Font for ASCII rendering
     private Font asciiFont;
@@ -161,12 +136,7 @@ public class GamePanel extends JPanel implements ActionListener {
             }
         }
 
-        Rectangle getBounds(int charWidth, int charHeight) {
-            if (!isAlive()) return new Rectangle(0, 0, 0, 0);
-            int approxWidth = Constants.BARRIER_ASCII_WIDTH * charWidth;
-            int approxHeight = Constants.BARRIER_ASCII_HEIGHT * charHeight;
-            return new Rectangle(x, y, approxWidth, approxHeight);
-        }
+       
     }
 
     // --- New Inner Class for Server Communication ---
@@ -248,7 +218,7 @@ public class GamePanel extends JPanel implements ActionListener {
         // Top Bar (Connection)
         connectButton = new JButton("Conexión");
         connectButton.setBounds(10, 10, 100, 30);
-        connectButton.addActionListener(e -> connectToServer());
+        connectButton.addActionListener(_ -> connectToServer());
         add(connectButton);
 
         portField = new JTextField("5123");
@@ -262,14 +232,14 @@ public class GamePanel extends JPanel implements ActionListener {
         // Start Game Button
         startGameButton = new JButton("Start Game");
         startGameButton.setBounds(300, 10, 120, 30);
-        startGameButton.addActionListener(e -> sendAction(new PlayerAction(PlayerAction.ActionType.START_GAME, myPlayerId)));
+        startGameButton.addActionListener(_ -> sendAction(new PlayerAction(PlayerAction.ActionType.START_GAME, myPlayerId)));
         startGameButton.setEnabled(false);
         add(startGameButton);
 
         // Pause Button
         pauseButton = new JButton("Pause");
         pauseButton.setBounds(430, 10, 100, 30);
-        pauseButton.addActionListener(e -> sendAction(new PlayerAction(PlayerAction.ActionType.TOGGLE_PAUSE, myPlayerId)));
+        pauseButton.addActionListener(_ -> sendAction(new PlayerAction(PlayerAction.ActionType.TOGGLE_PAUSE, myPlayerId)));
         pauseButton.setEnabled(false);
 
         // Game Area is now the panel itself, remove JTextArea setup
@@ -441,8 +411,6 @@ public class GamePanel extends JPanel implements ActionListener {
             repaint();
         }
     }
-
-    private void updateGame(double deltaTime) { /* Server drives state - Keep empty or for local-only effects */ }
 
     // --- Rendering (Uses Server State) ---
     @Override
