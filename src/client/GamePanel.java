@@ -271,35 +271,6 @@ public class GamePanel extends JPanel implements ActionListener {
 
         // Game Area is now the panel itself, remove JTextArea setup
 
-        // Right Side Buttons
-        int buttonPanelX = Constants.GAME_AREA_RIGHT_X + 5; // Move slightly outside game area
-        int buttonYStart = Constants.TOP_BAR_HEIGHT + 200;
-
-        leftButton = new JButton("<");
-        leftButton.setBounds(buttonPanelX, buttonYStart, 50, 30);
-        leftButton.addActionListener(this); // Use main panel listener
-        leftButton.setActionCommand("left");
-        leftButton.setFocusable(false);
-        add(leftButton);
-
-        rightButton = new JButton(">");
-        rightButton.setBounds(buttonPanelX + 60, buttonYStart, 50, 30);
-        rightButton.addActionListener(this);
-        rightButton.setActionCommand("right");
-        rightButton.setFocusable(false);
-        add(rightButton);
-
-        shootButton = new JButton("disparar");
-        shootButton.setBounds(buttonPanelX, buttonYStart + 100, 110, 30);
-        shootButton.addActionListener(this);
-        shootButton.setActionCommand("shoot");
-        shootButton.setFocusable(false);
-        add(shootButton);
-
-        // Start with game buttons disabled
-        leftButton.setEnabled(false);
-        rightButton.setEnabled(false);
-        shootButton.setEnabled(false);
         resetConnectionUI(); // Call helper to set initial state
     }
 
@@ -588,7 +559,7 @@ public class GamePanel extends JPanel implements ActionListener {
         Font uiFont = new Font("Arial", Font.BOLD, 18);
         g.setFont(uiFont);
         FontMetrics fm = g.getFontMetrics(uiFont);
-        int textY = 35;
+        int textY = 65;
 
         g.drawString("Score: " + displayScore, Constants.SIDE_MARGIN, textY);
         int scoreWidth = fm.stringWidth("Score: " + displayScore);
