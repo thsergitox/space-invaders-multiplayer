@@ -10,30 +10,52 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.CopyOnWriteArrayList; // Use thread-safe list for concurrent modification
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.net.Socket;
+import java.net.UnknownHostException;
+import java.util.Map; // For gameState.players
+import java.util.concurrent.ConcurrentHashMap; // To store local copy of players
+import javax.swing.JOptionPane;
 
 import common.Constants;
+import common.*; // Import all common classes
 
 public class GamePanel extends JPanel implements ActionListener {
 
+    // --- Networking Fields ---
+    private Socket socket;
+    private ObjectOutputStream out;
+    private ObjectInputStream in;
+    private volatile boolean isConnected = false;
+    private int myPlayerId = -1; // Assigned by server
+    private ServerListener serverListener;
+    private Thread serverListenerThread;
+    private volatile GameStateUpdate latestGameState;
+
+    // Local representation of players based on last GameStateUpdate
+    private Map<Integer, PlayerState> currentPlayers = new ConcurrentHashMap<>();
+
     // --- Game State Variables ---
-    private boolean inGame = true; // Flag to check if the game is running
-    private boolean paused = false; // TODO: Implement pausing
-    private Timer timer;          // Timer for game loop
-    private long lastFrameTime;   // For delta time calculation
+    private boolean inGame = true; // Now more accurately means "connected and server says game is on"
+    private boolean paused = false;
+    private Timer timer;
+    private long lastFrameTime;
+    private int currentLevel = 1; // Keep local copy for display
+    private int lives = Constants.PLAYER_LIVES; // Keep local copy for display
+    private int score = 0; // Keep local copy for display
+    private int highScore = 0; // Local high score
+    private boolean movingLeft = false; // Still used for sending actions
+    private boolean movingRight = false;
 
     // Player
     private int playerX;
     private int playerY;
-    private boolean movingLeft = false;
-    private boolean movingRight = false;
-    private int lives = Constants.PLAYER_LIVES;
-    private int score = 0;
-    private int highScore = 0; // TODO: Load/Save High Score
 
-    // Player Projectile
-    private int playerProjectileX;
-    private int playerProjectileY;
-    private boolean playerProjectileActive = false;
+    // Player Projectiles (Changed to List)
+    private List<Projectile> playerProjectiles;
 
     // Invaders
     private List<Invader> invaders;
@@ -42,46 +64,176 @@ public class GamePanel extends JPanel implements ActionListener {
     private boolean invadersNeedToDrop = false;
     private long lastInvaderMoveTime = 0;
 
-    // Barriers (Simplified: Using positions, health TBD)
-    // private List<Point> barriers; // Or a Barrier class
+    // Invader Projectiles
+    private List<Projectile> invaderProjectiles;
+    private Random random = new Random();
+
+    // Barriers (Placeholders for now)
+    private List<Barrier> barriers;
 
     // Font for ASCII rendering
     private Font asciiFont;
     private int charWidth;
     private int charHeight;
 
-    // --- UI Components --- (Keep for connection later)
+    // --- UI Components ---
     private JTextField portField;
     private JTextField ipField;
     private JButton connectButton;
     private JButton leftButton;
     private JButton rightButton;
     private JButton shootButton;
-    // private JTextArea gameArea; // REMOVED
 
     // --- Inner Classes ---
-    // Simple Invader class for position and type (points)
+    // Projectile class (can be used for player and invaders)
+    private static class Projectile {
+        int x, y;
+        boolean active = true;
+        // Optional: type (PLAYER, INVADER)
+
+        Projectile(int x, int y) {
+            this.x = x;
+            this.y = y;
+        }
+
+        Rectangle getBounds(int charWidth, int charHeight) {
+            // Simple bounds for single character projectile
+            return new Rectangle(x, y - charHeight, charWidth, charHeight); // y adjusted because drawString draws at baseline
+        }
+    }
+
+    // Simple Invader class
     private static class Invader {
         int x, y;
         int points; // Based on initial row
+        int row;    // Original row index
         boolean alive = true;
 
-        Invader(int x, int y, int points) {
+        Invader(int x, int y, int points, int row) {
             this.x = x;
             this.y = y;
             this.points = points;
+            this.row = row;
         }
 
-        Rectangle getBounds() {
-             // Use estimated ASCII dimensions for collision
-            return new Rectangle(x, y, Constants.INVADER_ASCII_WIDTH * 6, Constants.INVADER_ASCII_HEIGHT * 12); // Approx pixel size
+        Rectangle getBounds(int charWidth, int charHeight) {
+            // Use estimated ASCII dimensions for collision
+            // Adjust coords slightly for better feel with ASCII
+            int approxWidth = Constants.INVADER_ASCII_WIDTH * charWidth / 2; // Rough pixel width
+            int approxHeight = Constants.INVADER_ASCII_HEIGHT * charHeight;
+            return new Rectangle(x + approxWidth / 4, y, approxWidth, approxHeight);
+        }
+    }
+
+    // Simple Barrier class
+    private static class Barrier {
+        int x, y;
+        int health;
+        String[] currentSprite; // Changes with health
+
+        Barrier(int x, int y) {
+            this.x = x;
+            this.y = y;
+            this.health = Constants.BARRIER_INITIAL_HEALTH;
+            updateSprite();
+        }
+
+        void hit() {
+            if (health > 0) {
+                health--;
+                updateSprite();
+            }
+        }
+
+        boolean isAlive() {
+            return health > 0;
+        }
+
+        // TODO: Implement different sprites based on health level
+        private void updateSprite() {
+            if (health <= 0) {
+                currentSprite = null; // Or an empty array
+            } else {
+                // For now, always use full health sprite
+                currentSprite = Constants.BARRIER_SPRITE_LVL_0;
+            }
+        }
+
+        Rectangle getBounds(int charWidth, int charHeight) {
+            if (!isAlive()) return new Rectangle(0, 0, 0, 0);
+            int approxWidth = Constants.BARRIER_ASCII_WIDTH * charWidth;
+            int approxHeight = Constants.BARRIER_ASCII_HEIGHT * charHeight;
+            return new Rectangle(x, y, approxWidth, approxHeight);
+        }
+    }
+
+    // --- New Inner Class for Server Communication ---
+    private class ServerListener implements Runnable {
+        @Override
+        public void run() {
+            try {
+                // First, read the player ID assigned by the server
+                Object initialMsg = in.readObject();
+                if (initialMsg instanceof Integer) {
+                    myPlayerId = (Integer) initialMsg;
+                    isConnected = true; // Set connected *after* getting ID
+                    System.out.println("[Client] Received Player ID: " + myPlayerId);
+                    // Update UI to enable game buttons now we have ID
+                    SwingUtilities.invokeLater(() -> {
+                         leftButton.setEnabled(true);
+                         rightButton.setEnabled(true);
+                         shootButton.setEnabled(true);
+                         requestFocusInWindow();
+                    });
+                } else {
+                    System.err.println("[Client] Expected Integer player ID but received: " + initialMsg);
+                    disconnect();
+                    return;
+                }
+
+                // Then, continuously read game state updates
+                while (isConnected && !Thread.currentThread().isInterrupted()) {
+                    Object receivedObject = in.readObject();
+                    if (receivedObject instanceof GameStateUpdate) {
+                        latestGameState = (GameStateUpdate) receivedObject;
+                        // Update local state copies if needed for immediate display
+                        if(latestGameState.players != null) {
+                            currentPlayers.clear();
+                            currentPlayers.putAll(latestGameState.players);
+                            PlayerState myState = currentPlayers.get(myPlayerId);
+                            if(myState != null) {
+                                // Update local display copies
+                                score = myState.score;
+                                lives = myState.lives;
+                            }
+                        }
+                        if (latestGameState != null) {
+                            currentLevel = latestGameState.currentLevel;
+                            inGame = !latestGameState.isGameOver;
+                        }
+                    } else {
+                         System.err.println("[Client] Received unexpected object type: " + receivedObject.getClass().getName());
+                    }
+                }
+            } catch (IOException | ClassNotFoundException e) {
+                 if (isConnected) {
+                    System.err.println("[Client] Disconnected from server: " + e.getMessage());
+                    disconnect();
+                 }
+            } finally {
+                 System.out.println("[Client] Server listener thread finished.");
+                 disconnect();
+            }
         }
     }
 
     // --- Constructor & Initialization ---
     public GamePanel() {
+        // Init lists if they were still used locally (they aren't needed for server-driven state)
+
+        // Setup panel and initial game state
         initPanel();
-        initUIComponents(); // Keep UI for now, but rendering is separate
+        initUIComponents();
         initGame();
     }
 
@@ -108,13 +260,13 @@ public class GamePanel extends JPanel implements ActionListener {
         portField.setBounds(10, 10, 60, 30);
         add(portField);
 
-        ipField = new JTextField("192.168.0.125");
+        ipField = new JTextField("127.0.0.1"); // Default to localhost
         ipField.setBounds(80, 10, 120, 30);
         add(ipField);
 
         connectButton = new JButton("Conexión");
         connectButton.setBounds(210, 10, 100, 30);
-        connectButton.setEnabled(false);
+        connectButton.addActionListener(e -> connectToServer()); // Add listener
         add(connectButton);
 
         // Game Area is now the panel itself, remove JTextArea setup
@@ -125,7 +277,7 @@ public class GamePanel extends JPanel implements ActionListener {
 
         leftButton = new JButton("<");
         leftButton.setBounds(buttonPanelX, buttonYStart, 50, 30);
-        leftButton.addActionListener(this);
+        leftButton.addActionListener(this); // Use main panel listener
         leftButton.setActionCommand("left");
         leftButton.setFocusable(false);
         add(leftButton);
@@ -143,341 +295,427 @@ public class GamePanel extends JPanel implements ActionListener {
         shootButton.setActionCommand("shoot");
         shootButton.setFocusable(false);
         add(shootButton);
+
+        // Start with game buttons disabled
+        leftButton.setEnabled(false);
+        rightButton.setEnabled(false);
+        shootButton.setEnabled(false);
+        resetConnectionUI(); // Call helper to set initial state
     }
 
     private void initGame() {
-        invaders = new ArrayList<>();
-        // Calculate starting X for the grid to be centered
-        int gridWidth = Constants.INVADER_COLS * (Constants.INVADER_ASCII_WIDTH * charWidth + Constants.INVADER_H_SPACING) - Constants.INVADER_H_SPACING;
-        int startX = Constants.GAME_AREA_LEFT_X + (Constants.GAME_AREA_WIDTH - gridWidth) / 2;
+        this.myPlayerId = -1;
+        this.isConnected = false;
+        this.latestGameState = null;
+        this.currentPlayers.clear();
+        this.movingLeft = false;
+        this.movingRight = false;
+        resetConnectionUI(); // Set initial UI state
 
-        for (int row = 0; row < Constants.INVADER_ROWS; row++) {
-            for (int col = 0; col < Constants.INVADER_COLS; col++) {
-                int invaderX = startX + col * (Constants.INVADER_ASCII_WIDTH * charWidth + Constants.INVADER_H_SPACING);
-                int invaderY = Constants.INVADER_GRID_START_Y + row * (Constants.INVADER_ASCII_HEIGHT * charHeight + Constants.INVADER_V_SPACING);
-                int points = 0;
-                // Assign points based on row (as per requirements)
-                 if (row == 0) points = Constants.INVADER_SMALL_POINTS;
-                 else if (row <= 2) points = Constants.INVADER_MEDIUM_POINTS;
-                 else points = Constants.INVADER_LARGE_POINTS;
-
-                invaders.add(new Invader(invaderX, invaderY, points));
-            }
+        // Start the rendering timer
+        if (timer == null) {
+            timer = new Timer(1000 / Constants.TARGET_FPS, this);
+            timer.start();
+            lastFrameTime = System.nanoTime();
+        } else if (!timer.isRunning()) {
+            timer.start();
+            lastFrameTime = System.nanoTime();
         }
-
-        // Player setup
-        playerX = Constants.PLAYER_START_X;
-        playerY = Constants.PLAYER_START_Y;
-
-        // Start timer
-        timer = new Timer(1000 / Constants.TARGET_FPS, this);
-        lastFrameTime = System.nanoTime();
-        timer.start();
+        System.out.println("GamePanel initialized for connection.");
     }
 
-    // --- Game Loop & Updates ---
+    // --- Networking Logic ---
+    private void connectToServer() {
+        if (isConnected) return;
 
-    @Override
-    public void actionPerformed(ActionEvent e) {
-        long currentTime = System.nanoTime();
-        double deltaTime = (currentTime - lastFrameTime) / 1_000_000_000.0; // Delta time in seconds
-        lastFrameTime = currentTime;
-
-        if (inGame && !paused) {
-            updateGame(deltaTime);
-            checkCollisions();
-            repaint(); // Request redraw
+        String host = ipField.getText().trim();
+        String portStr = portField.getText().trim();
+        int port;
+        try {
+            port = Integer.parseInt(portStr);
+             if (port < 1 || port > 65535) throw new NumberFormatException();
+        } catch (NumberFormatException ex) {
+            JOptionPane.showMessageDialog(this, "Invalid port number (1-65535).", "Connection Error", JOptionPane.ERROR_MESSAGE);
+            return;
         }
-
-        // Handle button clicks (separate from game loop updates)
-        String command = e.getActionCommand();
-        if (command != null) {
-            handleButtonAction(command);
-        }
-    }
-
-    private void updateGame(double deltaTime) {
-        updatePlayer(deltaTime);
-        updatePlayerProjectile(deltaTime);
-        updateInvaders(deltaTime);
-        // TODO: updateInvaderProjectiles(deltaTime);
-        // TODO: updateUFO(deltaTime);
-    }
-
-    private void updatePlayer(double deltaTime) {
-        int dx = 0;
-        if (movingLeft) {
-            dx -= (int) (Constants.PLAYER_SPEED_PX_PER_SEC * deltaTime);
-        }
-        if (movingRight) {
-            dx += (int) (Constants.PLAYER_SPEED_PX_PER_SEC * deltaTime);
-        }
-
-        playerX += dx;
-
-        // Clamp player position to screen bounds
-        if (playerX < Constants.GAME_AREA_LEFT_X) {
-            playerX = Constants.GAME_AREA_LEFT_X;
-        }
-        int playerPixelWidth = Constants.PLAYER_ASCII_WIDTH * charWidth;
-        if (playerX + playerPixelWidth > Constants.GAME_AREA_RIGHT_X) {
-            playerX = Constants.GAME_AREA_RIGHT_X - playerPixelWidth;
-        }
-    }
-
-    private void updatePlayerProjectile(double deltaTime) {
-        if (playerProjectileActive) {
-            int dy = (int) (Constants.PLAYER_PROJECTILE_SPEED_PX_PER_SEC * deltaTime);
-            playerProjectileY -= dy;
-
-            // Check if projectile went off-screen
-            if (playerProjectileY < Constants.GAME_AREA_TOP_Y) {
-                playerProjectileActive = false;
-            }
-        }
-    }
-
-     private void updateInvaders(double deltaTime) {
-        // Calculate how much time has passed since last move for speed scaling
-        long now = System.nanoTime();
-        double timeSinceLastMove = (now - lastInvaderMoveTime) / 1_000_000_000.0;
-
-        // Only move invaders periodically based on their speed
-        // This creates the step-like movement
-         double moveInterval = 1.0 / (invaderSpeedX / (Constants.INVADER_ASCII_WIDTH * charWidth)); // Time to move one invader width
-         // Simplified: move every frame for now, refine later if jerky
-         // if (timeSinceLastMove >= moveInterval) {
-
-            int dx = (int) (invaderSpeedX * invaderDirection * deltaTime);
-            boolean boundaryHit = false;
-
-            if (invadersNeedToDrop) {
-                 // Move all invaders down
-                 for (Invader invader : invaders) {
-                     invader.y += Constants.INVADER_DROP_DISTANCE;
-                     // Check if invaders reached player level (Game Over condition)
-                     if (invader.y + (Constants.INVADER_ASCII_HEIGHT * charHeight) >= playerY - 20) {
-                         inGame = false; // Trigger Game Over
-                     }
-                 }
-                 invaderDirection *= -1; // Change direction
-                 invaderSpeedX += Constants.INVADER_SPEED_INCREMENT; // Increase speed
-                 invadersNeedToDrop = false;
-                 dx = 0; // Don't move horizontally on the same frame as dropping
-            } else {
-                // Check boundaries before moving horizontally
-                for (Invader invader : invaders) {
-                    int invaderPixelWidth = Constants.INVADER_ASCII_WIDTH * charWidth;
-                    if (invaderDirection == 1 && invader.x + invaderPixelWidth + dx > Constants.GAME_AREA_RIGHT_X) {
-                        boundaryHit = true;
-                        dx = Constants.GAME_AREA_RIGHT_X - (invader.x + invaderPixelWidth); // Adjust dx to touch boundary
-                        break;
-                    } else if (invaderDirection == -1 && invader.x + dx < Constants.GAME_AREA_LEFT_X) {
-                        boundaryHit = true;
-                        dx = Constants.GAME_AREA_LEFT_X - invader.x; // Adjust dx to touch boundary
-                        break;
-                    }
-                }
-            }
-
-            // Move all invaders horizontally
-            for (Invader invader : invaders) {
-                invader.x += dx;
-            }
-
-             if (boundaryHit) {
-                 invadersNeedToDrop = true;
-             }
-
-           // lastInvaderMoveTime = now;
-        // }
-        // TODO: Invader shooting logic
-    }
-
-
-    private void checkCollisions() {
-        if (!playerProjectileActive) {
+        if (host.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Server IP cannot be empty.", "Connection Error", JOptionPane.ERROR_MESSAGE);
             return;
         }
 
-        Rectangle projectileBounds = new Rectangle(playerProjectileX, playerProjectileY, charWidth, charHeight);
+        System.out.println("Attempting to connect to " + host + ":" + port);
+        connectButton.setEnabled(false);
+        ipField.setEnabled(false);
+        portField.setEnabled(false);
 
-        Iterator<Invader> iterator = invaders.iterator();
-        while (iterator.hasNext()) {
-            Invader invader = iterator.next();
-            if (invader.getBounds().intersects(projectileBounds)) {
-                playerProjectileActive = false; // Projectile disappears
-                invader.alive = false; // Mark invader as not alive
-                score += invader.points; // Add score
-                if(score > highScore) highScore = score; // Update high score
+        new Thread(() -> {
+            try {
+                socket = new Socket(host, port);
+                out = new ObjectOutputStream(socket.getOutputStream());
+                in = new ObjectInputStream(socket.getInputStream());
+                System.out.println("Socket and streams created. Starting listener...");
 
-                iterator.remove(); // Remove invader from list
-                break; // Only one collision per projectile frame
+                serverListener = new ServerListener();
+                serverListenerThread = new Thread(serverListener);
+                serverListenerThread.start();
+                // ServerListener enables game buttons upon receiving player ID
+
+            } catch (UnknownHostException e) {
+                handleConnectionError("Could not find server: " + host, e);
+            } catch (IOException e) {
+                 // Check for specific connection refused error
+                 String msg = (e.getMessage().contains("Connection refused"))
+                           ? "Connection refused. Is server running?"
+                           : "Could not connect: " + e.getMessage();
+                handleConnectionError(msg, e);
+            }
+        }).start();
+    }
+
+    private void handleConnectionError(String message, Exception e) {
+         System.err.println("Connection failed: " + e.getMessage());
+         SwingUtilities.invokeLater(() -> {
+            JOptionPane.showMessageDialog(GamePanel.this, message, "Connection Error", JOptionPane.ERROR_MESSAGE);
+            resetConnectionUI(); // Re-enable connection fields
+         });
+         disconnect(); // Ensure cleanup happens
+    }
+
+    // Send action to server
+    private synchronized void sendAction(PlayerAction action) {
+        if (!isConnected || out == null) return;
+        try {
+            out.writeObject(action);
+            out.flush();
+        } catch (IOException e) {
+            System.err.println("Error sending action ("+action.type+"): " + e.getMessage());
+            disconnect();
+        }
+    }
+
+    // Disconnect logic
+    private void disconnect() {
+        if (!isConnected && socket == null) return;
+        boolean wasConnected = isConnected;
+        isConnected = false;
+        System.out.println("Disconnecting client (ID: "+myPlayerId+")...");
+
+        int idToDisconnect = myPlayerId;
+        myPlayerId = -1;
+
+        if (wasConnected && out != null && idToDisconnect != -1) {
+            try {
+                PlayerAction disconnectAction = new PlayerAction(PlayerAction.ActionType.DISCONNECT, idToDisconnect);
+                out.writeObject(disconnectAction);
+                out.flush();
+                 System.out.println("Sent DISCONNECT action to server.");
+            } catch (Exception e) {
+                 System.err.println("Error sending disconnect message: " + e.getMessage());
             }
         }
 
-        // TODO: Check invader projectiles vs player
-        // TODO: Check player/invader projectiles vs barriers
-        // TODO: Check invaders vs barriers
+        if (serverListenerThread != null) {
+            serverListenerThread.interrupt();
+             try { serverListenerThread.join(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } // Wait briefly
+        }
+
+        // Close resources quietly
+        try { if (in != null) in.close(); } catch (IOException e) {} finally { in = null; }
+        try { if (out != null) out.close(); } catch (IOException e) {} finally { out = null; }
+        try { if (socket != null) socket.close(); } catch (IOException e) {} finally { socket = null; }
+
+        serverListenerThread = null;
+        serverListener = null;
+        latestGameState = null;
+        currentPlayers.clear();
+
+        System.out.println("Client disconnected. Resetting UI.");
+        SwingUtilities.invokeLater(this::resetConnectionUI);
     }
 
-    // --- Rendering --- (Directly on JPanel)
+    // Helper to reset UI
+    private void resetConnectionUI() {
+        if(ipField != null) ipField.setEnabled(true);
+        if(portField != null) portField.setEnabled(true);
+        if(connectButton != null) connectButton.setEnabled(true);
+        if(leftButton != null) leftButton.setEnabled(false);
+        if(rightButton != null) rightButton.setEnabled(false);
+        if(shootButton != null) shootButton.setEnabled(false);
+        System.out.println("Connection UI Reset.");
+    }
 
+     // Called from GameWindow when closing
+     public void notifyClosing() {
+          disconnect();
+     }
+
+    // --- Game Loop & Updates (Simplified) ---
+    @Override
+    public void actionPerformed(ActionEvent e) {
+        // Check if the action came from a button OR the timer
+        String command = e.getActionCommand();
+        if (command != null) {
+            // Button press - handled by handleButtonAction
+            handleButtonAction(command);
+        } else {
+            // Timer tick - just repaint if not paused locally
+             if (!paused) {
+                 // Server drives state updates, local updateGame is minimal
+             }
+            repaint();
+        }
+    }
+
+    private void updateGame(double deltaTime) { /* Server drives state - Keep empty or for local-only effects */ }
+
+    // --- Rendering (Uses Server State) ---
     @Override
     protected void paintComponent(Graphics g) {
         super.paintComponent(g);
         Graphics2D g2d = (Graphics2D) g;
+        setupRenderingHints(g2d);
 
-        // Set rendering hints for potentially better quality
-        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
-        g2d.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_OFF);
-
-        // Draw Background (already done by setBackground)
-
-        if (inGame) {
-            drawGameObjects(g2d);
+        // Draw based on connection status and latest server state
+        if (isConnected && latestGameState != null) {
+             // Use inGame flag which is updated by listener based on GameStateUpdate
+            if (inGame) {
+                drawGameObjectsFromServer(g2d);
+            } else {
+                drawGameOver(g2d); // Show server-driven game over
+            }
         } else {
-            drawGameOver(g2d);
+            // Draw screen indicating disconnected status or waiting for connection/state
+            drawWaitingScreen(g2d);
         }
 
-        // Draw UI on top
+        // Always draw UI overlay (Score, Lives, Level etc.)
         drawUI(g2d);
 
         Toolkit.getDefaultToolkit().sync();
     }
 
-    private void drawGameObjects(Graphics2D g) {
+    private void setupRenderingHints(Graphics2D g2d) {
+        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
+        g2d.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_OFF);
+    }
+
+    private void drawWaitingScreen(Graphics2D g) {
+        g.setColor(Color.DARK_GRAY);
+        g.fillRect(0, 0, getWidth(), getHeight());
+        g.setFont(new Font("Arial", Font.BOLD, 24));
+        g.setColor(Color.WHITE);
+        String msg = isConnected ? "Connected. Waiting for server state..." : "Disconnected";
+        FontMetrics fm = g.getFontMetrics();
+        g.drawString(msg, (getWidth() - fm.stringWidth(msg)) / 2, getHeight() / 2 - 20);
+        if (!isConnected) {
+             String help = "Enter Server IP/Port and click Conexión";
+             g.setFont(new Font("Arial", Font.PLAIN, 14));
+             fm = g.getFontMetrics();
+            g.drawString(help, (getWidth() - fm.stringWidth(help)) / 2, getHeight() / 2 + 20);
+        }
+    }
+
+    // Draw game elements based on the latest GameStateUpdate from the server
+    private void drawGameObjectsFromServer(Graphics2D g) {
+        if (latestGameState == null) return; // Safety check
+
         g.setFont(asciiFont);
-        g.setColor(Constants.DEFAULT_TEXT_COLOR); // Default color for ASCII
+        g.setColor(Constants.DEFAULT_TEXT_COLOR);
 
-        // Draw Player
-        drawAsciiArt(g, Constants.PLAYER_SPRITE, playerX, playerY);
-
-        // Draw Player Projectile
-        if (playerProjectileActive) {
-            g.setColor(Constants.PLAYER_PROJECTILE_COLOR);
-            g.drawString(Constants.PLAYER_PROJECTILE_SPRITE, playerProjectileX, playerProjectileY);
+        // Draw Players
+        if (latestGameState.players != null) {
+            for (PlayerState player : latestGameState.players.values()) {
+                if (player.alive) {
+                    g.setColor((player.id == myPlayerId) ? Color.CYAN : Constants.DEFAULT_TEXT_COLOR);
+                    drawAsciiArt(g, Constants.PLAYER_SPRITE, player.x, player.y);
+                }
+            }
         }
 
         // Draw Invaders
         g.setColor(Constants.DEFAULT_TEXT_COLOR);
-        for (Invader invader : invaders) {
-            drawAsciiArt(g, Constants.INVADER_SPRITE, invader.x, invader.y);
+        if (latestGameState.invaders != null) {
+            for (GameStateUpdate.SimplePosition invaderPos : latestGameState.invaders) {
+                drawAsciiArt(g, Constants.INVADER_SPRITE, invaderPos.x, invaderPos.y);
+            }
         }
 
-        // TODO: Draw Barriers
-        // TODO: Draw UFO
-        // TODO: Draw Invader Projectiles
+        // Draw Barriers
+        g.setColor(Constants.BARRIER_COLOR);
+        if (latestGameState.barriers != null) {
+            for (GameStateUpdate.SimpleBarrierState barrierState : latestGameState.barriers) {
+                if (barrierState.health > 0) {
+                    // TODO: Select barrier sprite based on health
+                    drawAsciiArt(g, Constants.BARRIER_SPRITE_LVL_0, barrierState.x, barrierState.y);
+                }
+            }
+        }
+
+        // Draw Player Projectiles
+        g.setColor(Constants.PLAYER_PROJECTILE_COLOR);
+        if (latestGameState.playerProjectiles != null) {
+            for (GameStateUpdate.SimplePosition projPos : latestGameState.playerProjectiles) {
+                g.drawString(Constants.PLAYER_PROJECTILE_SPRITE, projPos.x, projPos.y);
+            }
+        }
+
+        // Draw Invader Projectiles
+        g.setColor(Constants.INVADER_PROJECTILE_COLOR);
+        if (latestGameState.invaderProjectiles != null) {
+            for (GameStateUpdate.SimplePosition projPos : latestGameState.invaderProjectiles) {
+                g.drawString(Constants.INVADER_PROJECTILE_SPRITE, projPos.x, projPos.y);
+            }
+        }
+
+        // TODO: Draw UFO from server state if/when implemented
     }
 
-    // Helper to draw multi-line ASCII strings
-    private void drawAsciiArt(Graphics g, String[] art, int x, int y) {
+     private void drawAsciiArt(Graphics g, String[] art, int x, int y) {
+        if (art == null) return; // Avoid NPE if sprite is null (e.g., destroyed barrier)
         for (int i = 0; i < art.length; i++) {
             g.drawString(art[i], x, y + i * charHeight);
         }
     }
 
     private void drawUI(Graphics2D g) {
-        // Draw the top bar background area (optional, if needed)
-        // g.setColor(Color.DARK_GRAY); // Example
-        // g.fillRect(0, 0, Constants.WINDOW_WIDTH, Constants.TOP_BAR_HEIGHT);
+        // Use local copies updated by listener for smoother display
+        int displayScore = score;
+        int displayLives = lives;
+        int displayLevel = currentLevel;
+        int displayHiScore = highScore;
 
         g.setColor(Constants.DEFAULT_TEXT_COLOR);
-        g.setFont(new Font("Arial", Font.BOLD, 18)); // Use a clearer font for UI text
+        Font uiFont = new Font("Arial", Font.BOLD, 18);
+        g.setFont(uiFont);
+        FontMetrics fm = g.getFontMetrics(uiFont);
+        int textY = 35;
 
-        g.drawString("Score: " + score, 50, 35);
-        g.drawString("Hi-Score: " + highScore, 600, 35);
-        g.drawString("Lives: " + lives, 350, 35);
-        // TODO: Draw life icons (small player sprites?)
-        // TODO: Draw Level indicator
+        g.drawString("Score: " + displayScore, Constants.SIDE_MARGIN, textY);
+        int scoreWidth = fm.stringWidth("Score: " + displayScore);
+        int livesX = Constants.SIDE_MARGIN + scoreWidth + 50;
+        g.drawString("Lives: " + displayLives, livesX, textY);
+        String levelText = "Level: " + displayLevel;
+        int levelTextWidth = fm.stringWidth(levelText);
+        g.drawString(levelText, (Constants.WINDOW_WIDTH - levelTextWidth) / 2, textY);
+        String hiScoreText = "Hi-Score: " + displayHiScore;
+        int hiScoreWidth = fm.stringWidth(hiScoreText);
+        g.drawString(hiScoreText, Constants.WINDOW_WIDTH - Constants.SIDE_MARGIN - hiScoreWidth, textY);
     }
 
-    private void drawGameOver(Graphics2D g) {
-        String msg = "Game Over";
-        Font font = new Font("Arial", Font.BOLD, 48);
-        FontMetrics fm = getFontMetrics(font);
+     private void drawGameOver(Graphics2D g) {
+         int finalScore = score; // Use local score copy
+         String msg = "Game Over";
+         Font font = new Font("Arial", Font.BOLD, 48);
+         FontMetrics fm = getFontMetrics(font);
+         g.setColor(Color.RED);
+         g.setFont(font);
+         g.drawString(msg, (Constants.WINDOW_WIDTH - fm.stringWidth(msg)) / 2, Constants.WINDOW_HEIGHT / 2 - 40);
 
-        g.setColor(Color.RED);
-        g.setFont(font);
-        g.drawString(msg, (Constants.WINDOW_WIDTH - fm.stringWidth(msg)) / 2,
-                     Constants.WINDOW_HEIGHT / 2 - 20);
-
-        String scoreMsg = "Final Score: " + score;
-        Font scoreFont = new Font("Arial", Font.PLAIN, 24);
-        fm = getFontMetrics(scoreFont);
-        g.setColor(Color.WHITE);
-        g.setFont(scoreFont);
-        g.drawString(scoreMsg, (Constants.WINDOW_WIDTH - fm.stringWidth(scoreMsg)) / 2,
-                     Constants.WINDOW_HEIGHT / 2 + 30);
-        // TODO: Add instruction to restart?
+         String scoreMsg = "Final Score: " + finalScore;
+         Font scoreFont = new Font("Arial", Font.PLAIN, 24);
+         fm = getFontMetrics(scoreFont);
+         g.setColor(Color.WHITE);
+         g.setFont(scoreFont);
+         g.drawString(scoreMsg, (Constants.WINDOW_WIDTH - fm.stringWidth(scoreMsg)) / 2, Constants.WINDOW_HEIGHT / 2 + 10);
+         // No restart message needed, server controls game state
     }
 
-    // --- Input Handling ---
-
+    // --- Input Handling (Sends Actions) ---
     private void handleButtonAction(String command) {
+        if (!isConnected || myPlayerId == -1) return; // Need to be connected and have an ID
+
         switch (command) {
             case "left":
-                // Simulate key press for continuous movement if held
-                movingLeft = true;
-                movingRight = false;
+                if (!movingLeft) { // Send START only once per continuous press
+                    sendAction(new PlayerAction(PlayerAction.ActionType.MOVE_LEFT_START, myPlayerId));
+                    movingLeft = true;
+                    movingRight = false; // Stop moving right if we press left
+                    if(movingRight) sendAction(new PlayerAction(PlayerAction.ActionType.MOVE_RIGHT_STOP, myPlayerId));
+                }
                 break;
             case "right":
-                movingRight = true;
-                movingLeft = false;
+                if (!movingRight) { // Send START only once
+                    sendAction(new PlayerAction(PlayerAction.ActionType.MOVE_RIGHT_START, myPlayerId));
+                    movingRight = true;
+                    movingLeft = false; // Stop moving left
+                    if(movingLeft) sendAction(new PlayerAction(PlayerAction.ActionType.MOVE_LEFT_STOP, myPlayerId));
+                }
                 break;
             case "shoot":
-                tryShoot();
-                break;
-        }
-        requestFocusInWindow(); // Keep focus on the panel
+                 sendAction(new PlayerAction(PlayerAction.ActionType.SHOOT, myPlayerId));
+                 break;
+         }
+         requestFocusInWindow(); // Keep focus for keyboard input
     }
 
-    private void tryShoot() {
-        if (inGame && !playerProjectileActive) {
-            playerProjectileActive = true;
-            // Calculate starting position (center top of player sprite)
-            playerProjectileX = playerX + (Constants.PLAYER_ASCII_WIDTH * charWidth) / 2 - charWidth / 2;
-            playerProjectileY = playerY - charHeight; // Start just above the player
-            // TODO: Play shooting sound
-        }
+    // Renamed from tryShoot to make purpose clear
+    private void sendShootAction() {
+        if (!isConnected || myPlayerId == -1) return;
+        sendAction(new PlayerAction(PlayerAction.ActionType.SHOOT, myPlayerId));
     }
 
     private class TAdapter extends KeyAdapter {
         @Override
         public void keyPressed(KeyEvent e) {
+            // Allow Esc even if not fully connected (to allow disconnect attempt)
+            if (e.getKeyCode() == KeyEvent.VK_ESCAPE) {
+                 System.out.println("Escape pressed, disconnecting...");
+                 disconnect();
+                 return;
+            }
+
+            if (!isConnected || myPlayerId == -1) return; // Ignore other input if not ready
+
+            // Game Over / Paused logic (client only pauses rendering)
+            if (!inGame) return; // Ignore game input if server says game over
+
             int key = e.getKeyCode();
 
             if (key == KeyEvent.VK_LEFT || key == KeyEvent.VK_A) {
-                movingLeft = true;
+                 if (!movingLeft) { // Send START only on first press
+                     sendAction(new PlayerAction(PlayerAction.ActionType.MOVE_LEFT_START, myPlayerId));
+                     movingLeft = true;
+                     // Stop opposite direction if needed
+                     if(movingRight) sendAction(new PlayerAction(PlayerAction.ActionType.MOVE_RIGHT_STOP, myPlayerId));
+                     movingRight = false;
+                 }
             }
-
-            if (key == KeyEvent.VK_RIGHT || key == KeyEvent.VK_D) {
-                movingRight = true;
+            else if (key == KeyEvent.VK_RIGHT || key == KeyEvent.VK_D) {
+                 if (!movingRight) { // Send START only on first press
+                     sendAction(new PlayerAction(PlayerAction.ActionType.MOVE_RIGHT_START, myPlayerId));
+                     movingRight = true;
+                      // Stop opposite direction if needed
+                     if(movingLeft) sendAction(new PlayerAction(PlayerAction.ActionType.MOVE_LEFT_STOP, myPlayerId));
+                     movingLeft = false;
+                 }
             }
-
-            if (key == KeyEvent.VK_SPACE || key == KeyEvent.VK_UP || key == KeyEvent.VK_W) {
-                tryShoot();
+            else if (key == KeyEvent.VK_SPACE || key == KeyEvent.VK_UP || key == KeyEvent.VK_W) {
+                 sendShootAction();
             }
-
-             if (key == KeyEvent.VK_P) { // Example: Pause toggle
+            else if (key == KeyEvent.VK_P) {
                  paused = !paused;
-             }
-
-             if (key == KeyEvent.VK_ESCAPE) { // Example: Exit
-                  System.exit(0);
-             }
+                 System.out.println(paused ? "Local render paused" : "Local render resumed");
+                 // Note: This pause is purely client-side rendering pause
+            }
         }
 
         @Override
         public void keyReleased(KeyEvent e) {
+             if (!isConnected || myPlayerId == -1) return;
+
             int key = e.getKeyCode();
 
             if (key == KeyEvent.VK_LEFT || key == KeyEvent.VK_A) {
-                movingLeft = false;
+                 if (movingLeft) { // Send STOP only if we were moving left
+                     sendAction(new PlayerAction(PlayerAction.ActionType.MOVE_LEFT_STOP, myPlayerId));
+                     movingLeft = false;
+                 }
             }
-
-            if (key == KeyEvent.VK_RIGHT || key == KeyEvent.VK_D) {
-                movingRight = false;
+            else if (key == KeyEvent.VK_RIGHT || key == KeyEvent.VK_D) {
+                 if (movingRight) { // Send STOP only if we were moving right
+                     sendAction(new PlayerAction(PlayerAction.ActionType.MOVE_RIGHT_STOP, myPlayerId));
+                     movingRight = false;
+                 }
             }
         }
     }

@@ -63,9 +63,9 @@ public class Constants {
     public static final int INVADER_V_SPACING = 20;
     public static final int INVADER_GRID_START_Y = 100;
     public static final int INVADER_DROP_DISTANCE = 15;
-    public static final float INVADER_INITIAL_SPEED_PX_PER_SEC = 30.0f;
-    public static final float INVADER_SPEED_INCREMENT = 2.0f;
-    public static final double INVADER_SHOOT_PROBABILITY_PER_SEC = 0.01;
+    public static final float INVADER_INITIAL_SPEED_PX_PER_SEC = 60.0f;
+    public static final float INVADER_SPEED_INCREMENT = 4.0f;
+    public static final double INVADER_SHOOT_PROBABILITY_PER_SEC = 0.1;
 
     // Invader Types (Sizes and Points)
     // Assuming fixed sizes for now, replace with actual ASCII dimensions if needed
@@ -118,16 +118,15 @@ public class Constants {
     public static final String PLAYER_PROJECTILE_SPRITE = "|";
     public static final String INVADER_PROJECTILE_SPRITE = "*";
 
-    // Placeholder for Barrier ASCII (can be multi-level based on damage)
+    // Placeholder for Barrier ASCII (Smaller: 3 lines)
     public static final String[] BARRIER_SPRITE_LVL_0 = {
         "████████",
-        "████████",
-        "████████",
-        "██  ██"
+        "██ ██ ██", // Added some gaps for visual damage later
+        "████████"
     };
      // Estimate dimensions
     public static final int BARRIER_ASCII_WIDTH = 8;
-    public static final int BARRIER_ASCII_HEIGHT = 4;
+    public static final int BARRIER_ASCII_HEIGHT = 3; // Updated height
 
     // Placeholder for UFO
     public static final String[] UFO_SPRITE = {
