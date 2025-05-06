@@ -83,6 +83,8 @@ public class GamePanel extends JPanel implements ActionListener {
     private JButton leftButton;
     private JButton rightButton;
     private JButton shootButton;
+    private JButton startGameButton;
+    private JButton pauseButton;
 
     // --- Inner Classes ---
     // Projectile class (can be used for player and invaders)
@@ -172,40 +174,28 @@ public class GamePanel extends JPanel implements ActionListener {
         @Override
         public void run() {
             try {
-                // First, read the player ID assigned by the server
                 Object initialMsg = in.readObject();
                 if (initialMsg instanceof Integer) {
                     myPlayerId = (Integer) initialMsg;
-                    isConnected = true; // Set connected *after* getting ID
                     System.out.println("[Client] Received Player ID: " + myPlayerId);
-                    // Update UI to enable game buttons now we have ID
-                    SwingUtilities.invokeLater(() -> {
-                         leftButton.setEnabled(true);
-                         rightButton.setEnabled(true);
-                         shootButton.setEnabled(true);
-                         requestFocusInWindow();
-                    });
+                    SwingUtilities.invokeLater(GamePanel.this::requestFocusInWindow);
+                    isConnected = true;
                 } else {
                     System.err.println("[Client] Expected Integer player ID but received: " + initialMsg);
                     disconnect();
                     return;
                 }
 
-                // Then, continuously read game state updates
                 while (isConnected && !Thread.currentThread().isInterrupted()) {
                     Object receivedObject = in.readObject();
                     if (receivedObject instanceof GameStateUpdate) {
                         latestGameState = (GameStateUpdate) receivedObject;
-                        // Update local state copies if needed for immediate display
+                        // Update local state copies
                         if(latestGameState.players != null) {
                             currentPlayers.clear();
                             currentPlayers.putAll(latestGameState.players);
                             PlayerState myState = currentPlayers.get(myPlayerId);
-                            if(myState != null) {
-                                // Update local display copies
-                                score = myState.score;
-                                lives = myState.lives;
-                            }
+                            if(myState != null) { score = myState.score; lives = myState.lives; }
                         }
                         if (latestGameState != null) {
                             currentLevel = latestGameState.currentLevel;
@@ -256,18 +246,31 @@ public class GamePanel extends JPanel implements ActionListener {
     // Keep UI components definitions but they don't control game area now
     private void initUIComponents() {
         // Top Bar (Connection)
+        connectButton = new JButton("Conexión");
+        connectButton.setBounds(10, 10, 100, 30);
+        connectButton.addActionListener(e -> connectToServer());
+        add(connectButton);
+
         portField = new JTextField("5123");
-        portField.setBounds(10, 10, 60, 30);
+        portField.setBounds(120, 10, 50, 30);
         add(portField);
 
-        ipField = new JTextField("127.0.0.1"); // Default to localhost
-        ipField.setBounds(80, 10, 120, 30);
+        ipField = new JTextField("127.0.0.1");
+        ipField.setBounds(180, 10, 100, 30);
         add(ipField);
 
-        connectButton = new JButton("Conexión");
-        connectButton.setBounds(210, 10, 100, 30);
-        connectButton.addActionListener(e -> connectToServer()); // Add listener
-        add(connectButton);
+        // Start Game Button
+        startGameButton = new JButton("Start Game");
+        startGameButton.setBounds(300, 10, 120, 30);
+        startGameButton.addActionListener(e -> sendAction(new PlayerAction(PlayerAction.ActionType.START_GAME, myPlayerId)));
+        startGameButton.setEnabled(false);
+        add(startGameButton);
+
+        // Pause Button
+        pauseButton = new JButton("Pause");
+        pauseButton.setBounds(430, 10, 100, 30);
+        pauseButton.addActionListener(e -> sendAction(new PlayerAction(PlayerAction.ActionType.TOGGLE_PAUSE, myPlayerId)));
+        pauseButton.setEnabled(false);
 
         // Game Area is now the panel itself, remove JTextArea setup
 
@@ -406,12 +409,14 @@ public class GamePanel extends JPanel implements ActionListener {
 
     // Helper to reset UI
     private void resetConnectionUI() {
-        if(ipField != null) ipField.setEnabled(true);
-        if(portField != null) portField.setEnabled(true);
-        if(connectButton != null) connectButton.setEnabled(true);
-        if(leftButton != null) leftButton.setEnabled(false);
-        if(rightButton != null) rightButton.setEnabled(false);
-        if(shootButton != null) shootButton.setEnabled(false);
+        if (ipField != null) ipField.setEnabled(true);
+        if (portField != null) portField.setEnabled(true);
+        if (connectButton != null) connectButton.setEnabled(true);
+        if (leftButton != null) leftButton.setEnabled(false);
+        if (rightButton != null) rightButton.setEnabled(false);
+        if (shootButton != null) shootButton.setEnabled(false);
+        if (startGameButton != null) startGameButton.setEnabled(false);
+        if (pauseButton != null) pauseButton.setEnabled(false);
         System.out.println("Connection UI Reset.");
     }
 
@@ -446,13 +451,18 @@ public class GamePanel extends JPanel implements ActionListener {
         Graphics2D g2d = (Graphics2D) g;
         setupRenderingHints(g2d);
 
+        // Update button states based on the very latest info
+        updateButtonStates();
+
         // Draw based on connection status and latest server state
         if (isConnected && latestGameState != null) {
-             // Use inGame flag which is updated by listener based on GameStateUpdate
-            if (inGame) {
+            if (!latestGameState.isGameOver) {
                 drawGameObjectsFromServer(g2d);
+                if (latestGameState.isPaused) {
+                     drawPausedOverlay(g2d);
+                }
             } else {
-                drawGameOver(g2d); // Show server-driven game over
+                drawGameOver(g2d);
             }
         } else {
             // Draw screen indicating disconnected status or waiting for connection/state
@@ -689,5 +699,75 @@ public class GamePanel extends JPanel implements ActionListener {
                  }
             }
         }
+    }
+
+    // Refined button state logic
+     private void updateButtonStates() {
+         // Determine server status from latest GameStateUpdate
+         boolean serverSentState = isConnected && latestGameState != null;
+         boolean serverSaysPaused = false;
+         boolean serverSaysGameOver = false;
+         boolean gameElementsPresent = false; // Are invaders/projectiles active?
+
+         if (serverSentState) {
+             serverSaysPaused = latestGameState.isPaused;
+             serverSaysGameOver = latestGameState.isGameOver;
+             // Check if core game elements exist (implies game is running or paused, not just lobby)
+             gameElementsPresent = (latestGameState.invaders != null && !latestGameState.invaders.isEmpty()) ||
+                                   (latestGameState.playerProjectiles != null && !latestGameState.playerProjectiles.isEmpty()) ||
+                                   (latestGameState.invaderProjectiles != null && !latestGameState.invaderProjectiles.isEmpty());
+         }
+
+        // --- Derived States --- 
+         boolean serverIsRunning = serverSentState && !serverSaysPaused && !serverSaysGameOver && gameElementsPresent;
+         boolean serverIsInLobby = serverSentState && !serverSaysPaused && !serverSaysGameOver && !gameElementsPresent;
+         // serverIsPaused = serverSaysPaused (defined above)
+         // serverIsGameOver = serverSaysGameOver (defined above)
+
+        // --- Enable/Disable Logic --- 
+
+         // Game control buttons only active when server is RUNNING
+         if (leftButton != null) leftButton.setEnabled(serverIsRunning);
+         if (rightButton != null) rightButton.setEnabled(serverIsRunning);
+         if (shootButton != null) shootButton.setEnabled(serverIsRunning);
+
+         // Start/Restart button enabled if connected AND (in lobby OR game is over)
+         // Also handle the brief moment before first state arrives
+         boolean enableStartButton = isConnected && (!serverSentState || serverIsInLobby || serverSaysGameOver);
+         if (startGameButton != null) {
+              startGameButton.setEnabled(enableStartButton);
+              startGameButton.setText(serverSaysGameOver ? "Restart Game" : "Start Game");
+         }
+
+         // Pause/Resume button enabled only if game is RUNNING or PAUSED
+         boolean enablePauseButton = serverSentState && (serverIsRunning || serverSaysPaused);
+         if (pauseButton != null) {
+              pauseButton.setEnabled(enablePauseButton);
+              pauseButton.setText(serverSaysPaused ? "Resume" : "Pause");
+         }
+
+         // Connection controls disabled when connected
+         if (connectButton != null) connectButton.setEnabled(!isConnected);
+         if (ipField != null) ipField.setEnabled(!isConnected);
+         if (portField != null) portField.setEnabled(!isConnected);
+
+         // --- Logging for Debugging --- 
+         /* // Uncomment for debugging button states
+          System.out.printf("UpdateButtons: isConnected=%b, serverSentState=%b, isRunning=%b, isPaused=%b, isGameOver=%b, inLobby=%b -> enableStart=%b, enablePause=%b, enableControls=%b\n",
+                  isConnected, serverSentState, serverIsRunning, serverSaysPaused, serverSaysGameOver, serverIsInLobby,
+                  startGameButton != null && startGameButton.isEnabled(),
+                  pauseButton != null && pauseButton.isEnabled(),
+                  leftButton != null && leftButton.isEnabled());
+         */
+     }
+
+    private void drawPausedOverlay(Graphics2D g) {
+        g.setColor(new Color(0, 0, 0, 150)); // Semi-transparent black overlay
+        g.fillRect(0, Constants.TOP_BAR_HEIGHT, getWidth(), getHeight() - Constants.TOP_BAR_HEIGHT);
+        g.setFont(new Font("Arial", Font.BOLD, 48));
+        g.setColor(Color.YELLOW);
+        String msg = "PAUSED";
+        FontMetrics fm = g.getFontMetrics();
+        g.drawString(msg, (getWidth() - fm.stringWidth(msg)) / 2, getHeight() / 2);
     }
 }

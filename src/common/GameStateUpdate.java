@@ -17,6 +17,7 @@ public class GameStateUpdate implements Serializable {
     // Add UFO state later
     public int currentLevel;
     public boolean isGameOver = false; // Global game over state
+    public boolean isPaused = false; // Added
 
     // Simple position class for generic objects
     public static class SimplePosition implements Serializable {

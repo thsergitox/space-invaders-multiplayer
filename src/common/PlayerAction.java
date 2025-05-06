@@ -12,8 +12,10 @@ public class PlayerAction implements Serializable {
         MOVE_RIGHT_START,
         MOVE_RIGHT_STOP,
         SHOOT,
-        CONNECT, // Initial message from client
-        DISCONNECT // Optional: Sent before closing
+        CONNECT,        // Initial message from client (might not be needed if ID sent first)
+        DISCONNECT,     // Optional: Sent before closing
+        START_GAME,     // <<< ADDED: Client requests game start/restart
+        TOGGLE_PAUSE    // <<< ADDED: Client requests pause/resume
     }
 
     public ActionType type;
@@ -24,7 +26,12 @@ public class PlayerAction implements Serializable {
         this.playerId = playerId;
     }
 
-     public PlayerAction(ActionType type) { // For CONNECT message before ID assigned
+     // Constructor for actions before ID assigned (potentially just CONNECT)
+     public PlayerAction(ActionType type) {
+        if (type != ActionType.CONNECT) {
+           // Consider throwing an exception if used improperly
+           System.err.println("Warning: PlayerAction created without ID for type: " + type);
+        }
         this.type = type;
         this.playerId = -1; // Indicate no ID yet
     }
