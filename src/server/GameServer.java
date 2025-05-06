@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.Random;
 import java.awt.Rectangle; // Use AWT Rectangle for collisions
+import java.util.concurrent.TimeUnit;
 
 // Main server class
 public class GameServer {
@@ -29,6 +30,16 @@ public class GameServer {
     private final ExecutorService clientExecutor; // To handle client threads
     private final List<ClientHandler> clients; // Thread-safe list of connected clients
     private final AtomicInteger nextPlayerId = new AtomicInteger(0);
+
+    // Server State Enum
+    private enum ServerState {
+        WAITING,    // Waiting for first player or after game over before restart
+        RUNNING,    // Game logic is active
+        GAME_OVER_DISPLAY // Showing game over message before reset
+    }
+    private volatile ServerState serverState = ServerState.WAITING;
+    private long gameOverTime = 0; // Timestamp when game over occurred
+    private static final long GAME_OVER_DISPLAY_DURATION_MS = 5000; // 5 seconds
 
     // --- Game State (Server authoritative) ---
     // This needs to replicate the core state managed by GamePanel previously,
@@ -113,20 +124,18 @@ public class GameServer {
     }
 
     public void start() {
-        if (running) {
-            System.out.println("Server is already running.");
-            return;
-        }
+        if (running) return;
         running = true;
+        serverState = ServerState.WAITING; // Ensure initial state
+        gameOver = false;
         try {
             serverSocket = new ServerSocket(port);
             System.out.println("Game Server started on port: " + port);
+            System.out.println("Server state: " + serverState);
 
-            // Initialize the first level state
-            setupLevel(1);
-            gameRunning = true; // Start the logic loop
+            // Start game logic loop immediately, it will wait internally
             new Thread(this::gameLoop).start();
-            System.out.println("Game logic loop started.");
+            System.out.println("Game logic loop thread started.");
 
             // Accept client connections loop
             while (running) {
@@ -144,11 +153,24 @@ public class GameServer {
                     ClientHandler clientHandler = new ClientHandler(clientSocket, this, playerId);
                     clients.add(clientHandler);
                     clientExecutor.submit(clientHandler);
-                     System.out.println("Client handler submitted for player " + playerId);
+                    System.out.println("Client handler submitted for player " + playerId);
+
+                    // Transition to RUNNING state if we were WAITING
+                    synchronized(this) { // Synchronize state transition
+                        if (serverState == ServerState.WAITING) {
+                             System.out.println("First player connected, changing state to RUNNING.");
+                             serverState = ServerState.RUNNING;
+                             // Optionally reset level 1 state here if needed,
+                             // but setupLevel(1) is called in constructor/restart logic
+                        }
+                    }
 
                 } catch (IOException e) {
-                    if (running) {
-                        System.err.println("Error accepting client connection: " + e.getMessage());
+                    if (!running || serverSocket.isClosed()) {
+                        System.out.println("Server socket closed, accepting connections stopped.");
+                        break; // Exit loop if server stopped
+                    } else {
+                         System.err.println("Error accepting client connection: " + e.getMessage());
                     }
                 }
             }
@@ -163,7 +185,8 @@ public class GameServer {
     private synchronized void setupLevel(int level) {
         System.out.println("[Server] Setting up Level " + level);
         currentLevel = level;
-        gameOver = false;
+        gameOver = false; // Reset logical game over flag
+        // serverState = ServerState.RUNNING; // State set by connect/restart logic
 
         // Clear transient objects
         invaders.clear();
@@ -208,7 +231,7 @@ public class GameServer {
             sp.state.x = Constants.PLAYER_START_X; // Adjust for multiple players later?
             sp.state.y = Constants.PLAYER_START_Y;
             sp.state.alive = true; // Revive for new level?
-             // sp.state.lives = Constants.PLAYER_LIVES; // Decide if lives reset per level
+             sp.state.lives = Constants.PLAYER_LIVES; // Reset lives on level setup
         }
         System.out.println("[Server] Reset player positions for level "+level+".");
     }
@@ -216,40 +239,71 @@ public class GameServer {
     // Placeholder for the main game loop on the server
     private void gameLoop() {
         long lastUpdateTime = System.nanoTime();
-        while (gameRunning && running) {
+        while (running) { // Loop as long as server is running
             long now = System.nanoTime();
             double deltaTime = (now - lastUpdateTime) / 1_000_000_000.0;
             lastUpdateTime = now;
 
-            // Update game state
-            updateServerGameState(deltaTime);
+            GameStateUpdate currentState = null;
 
-            // Check collisions
-            checkServerCollisions();
+            // Lock state during update/check phases
+            synchronized (this) {
+                switch (serverState) {
+                    case RUNNING:
+                        updateServerGameState(deltaTime);
+                        checkServerCollisions();
+                        checkGameConditions(); // This might change state to GAME_OVER_DISPLAY
+                        currentState = createGameStateUpdate();
+                        break;
 
-            // Check Win/Loss conditions
-            checkGameConditions();
+                    case WAITING:
+                         // Do nothing, maybe broadcast minimal state?
+                         currentState = createWaitingStateUpdate();
+                         // Check if players left while waiting
+                         if (players.isEmpty()) {
+                             // Stay in WAITING state
+                         } else {
+                             // This case might not be hit if connect transitions directly
+                              // serverState = ServerState.RUNNING;
+                         }
+                        break;
 
-            // Create GameStateUpdate object
-            GameStateUpdate currentState = createGameStateUpdate();
+                    case GAME_OVER_DISPLAY:
+                        currentState = createGameStateUpdate(); // Show final state
+                        if (System.currentTimeMillis() - gameOverTime > GAME_OVER_DISPLAY_DURATION_MS) {
+                            System.out.println("[Server] Game Over display finished. Resetting game.");
+                            setupLevel(1); // Reset to level 1
+                            // Transition back based on player presence
+                             if (players.isEmpty()) {
+                                 System.out.println("[Server] No players connected. Returning to WAITING state.");
+                                 serverState = ServerState.WAITING;
+                             } else {
+                                  System.out.println("[Server] Players connected. Restarting in RUNNING state.");
+                                  serverState = ServerState.RUNNING;
+                             }
+                        }
+                        break;
+                }
+            } // end synchronized block
 
-            // Broadcast state to all clients
-            broadcastGameState(currentState);
+            // Broadcast the determined state (outside synchronized block)
+            if (currentState != null) {
+                broadcastGameState(currentState);
+            }
 
-            // Sleep to maintain target FPS
+            // Sleep
             try {
                 long cycleTime = System.nanoTime() - now;
-                long sleepTime = (Constants.OPTIMAL_TIME - cycleTime) / 1_000_000; // ms
-                if (sleepTime > 0) {
-                    Thread.sleep(sleepTime);
-                }
+                // Adjust sleep time, ensure minimum sleep to prevent busy-waiting in WAITING state
+                long sleepTimeMs = Math.max(5, (Constants.OPTIMAL_TIME - cycleTime) / 1_000_000);
+                Thread.sleep(sleepTimeMs);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 System.out.println("[Server] Game loop interrupted.");
-                gameRunning = false;
+                running = false; // Stop server if loop is interrupted
             }
         }
-        System.out.println("[Server] Game loop stopped.");
+        System.out.println("[Server] Game loop thread finished.");
     }
 
     // Creates the state object to send to clients
@@ -309,9 +363,26 @@ public class GameServer {
 
     // Method called by ClientHandler when an action is received
     public synchronized void handlePlayerAction(PlayerAction action) {
+        // Ignore actions if server isn't in RUNNING state (except maybe DISCONNECT?)
+        if (serverState != ServerState.RUNNING && action.type != PlayerAction.ActionType.DISCONNECT) {
+             System.out.println("Ignoring action "+action.type+" from player "+action.playerId+" as server state is "+serverState);
+             return;
+        }
+
         ServerPlayer player = players.get(action.playerId);
-        if (player == null || !player.state.alive || gameOver) {
-            return; // Ignore actions for non-existent/dead players or if game is over
+        // Allow disconnect even if player is null/dead for cleanup
+         if (action.type == PlayerAction.ActionType.DISCONNECT) {
+             System.out.println("Player " + action.playerId + " requested disconnect via action.");
+             ClientHandler handler = findClientHandler(action.playerId);
+             if (handler != null) {
+                 removeClient(handler);
+             }
+             return; // Finished handling disconnect
+         }
+
+        // For other actions, player must exist and be alive
+        if (player == null || !player.state.alive) {
+            return;
         }
 
         switch (action.type) {
@@ -337,13 +408,6 @@ public class GameServer {
                  playerProjectiles.add(new ServerProjectile(startX, startY, true, player.state.id));
                  System.out.println("Player " + action.playerId + " shot. Proj count: " + playerProjectiles.size());
                 break;
-            case DISCONNECT:
-                 System.out.println("Player " + action.playerId + " requested disconnect via action.");
-                 ClientHandler handler = findClientHandler(action.playerId);
-                 if (handler != null) {
-                     removeClient(handler); // Let removeClient handle cleanup
-                 }
-                break;
             case CONNECT:
                 break; // Ignored
         }
@@ -357,8 +421,16 @@ public class GameServer {
         clients.remove(clientHandler);
         players.remove(clientHandler.getPlayerId());
         System.out.println("Removed player " + clientHandler.getPlayerId() + ". Remaining clients: " + clients.size());
-        // If last player leaves, maybe stop the game logic loop?
-         // if (players.isEmpty()) { gameRunning = false; }
+        // If last player leaves, go back to WAITING state
+         if (players.isEmpty() && serverState != ServerState.WAITING) {
+              System.out.println("[Server] Last player disconnected. Returning to WAITING state.");
+              serverState = ServerState.WAITING;
+              // Optionally clear game elements immediately?
+              // invaders.clear(); barriers.clear(); etc.
+              gameOver = false; // Reset game over logical flag
+         }
+         // Check if game over needs to be triggered now (e.g., last alive player leaves)
+          checkGameConditions();
     }
 
     private ClientHandler findClientHandler(int playerId) {
@@ -373,11 +445,19 @@ public class GameServer {
     public void stop() {
         if (!running) return;
          running = false;
-         gameRunning = false; // Stop game loop
+         // serverState = ServerState.WAITING; // Or some SHUTDOWN state?
          System.out.println("Stopping server...");
-         try { if (serverSocket != null) serverSocket.close(); } catch (IOException e) { /* ignore */ }
+         try { if (serverSocket != null && !serverSocket.isClosed()) serverSocket.close(); } catch (IOException e) { /* ignore */ }
          clientExecutor.shutdown();
-         System.out.println("Client executor shutdown requested.");
+          try {
+              if (!clientExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
+                  clientExecutor.shutdownNow();
+              }
+          } catch (InterruptedException e) {
+              clientExecutor.shutdownNow();
+              Thread.currentThread().interrupt();
+          }
+         System.out.println("Client executor shutdown.");
          for (ClientHandler client : new ArrayList<>(clients)) { // Iterate copy
              removeClient(client);
          }
@@ -401,7 +481,7 @@ public class GameServer {
 
     // --- Update Logic (Placeholder) ---
     private synchronized void updateServerGameState(double deltaTime) {
-         if (gameOver) return;
+         if (serverState != ServerState.RUNNING) return;
          updatePlayers(deltaTime);
          updateInvaders(deltaTime);
          updateProjectiles(deltaTime);
@@ -443,10 +523,11 @@ public class GameServer {
          if (invadersNeedToDrop) {
              for (ServerInvader invader : invaders) {
                  invader.y += Constants.INVADER_DROP_DISTANCE;
-                 if (invader.y + (Constants.INVADER_ASCII_HEIGHT * 12) >= Constants.PLAYER_START_Y - 20) { // Check bottom
-                     gameOver = true; // Invaders reached player level
-                     System.out.println("[Server] Game Over - Invaders reached bottom.");
-                     return; // Stop further updates this frame
+                 if (invader.y + (Constants.INVADER_ASCII_HEIGHT * 12) >= Constants.PLAYER_START_Y - 20) {
+                     // gameOver = true; // Don't set directly, let checkGameConditions handle state change
+                     System.out.println("[Server] Game Over Condition: Invaders reached bottom.");
+                      handleGameOver(); // Trigger game over state change
+                     return;
                  }
              }
              invaderDirection *= -1;
@@ -505,7 +586,7 @@ public class GameServer {
 
     // --- Collision Detection --- (Implementing logic)
      private synchronized void checkServerCollisions() {
-          if (gameOver) return;
+          if (serverState != ServerState.RUNNING) return;
 
           List<ServerProjectile> playerProjectilesToRemove = new ArrayList<>();
           List<ServerInvader> invadersToRemove = new ArrayList<>();
@@ -615,16 +696,16 @@ public class GameServer {
 
      // --- Check Game Conditions ---
       private synchronized void checkGameConditions() {
-          if (gameOver) return; // Already decided
+          if (serverState != ServerState.RUNNING) return;
 
           // Level Clear
           if (invaders.isEmpty()) {
                System.out.println("[Server] Level " + currentLevel + " cleared!");
-               setupLevel(currentLevel + 1); // Setup next level
-               return; // Don't check other conditions this frame
+               setupLevel(currentLevel + 1); // Setup next level immediately
+               return;
           }
 
-          // Any players still alive?
+          // Check if any player is still alive
           boolean anyPlayerAlive = false;
           for(ServerPlayer sp : players.values()) {
               if (sp.state.alive) {
@@ -633,8 +714,31 @@ public class GameServer {
               }
           }
           if (!anyPlayerAlive && !players.isEmpty()) {
-              System.out.println("[Server] Game Over - All players defeated.");
-              gameOver = true;
+              System.out.println("[Server] Game Over Condition: All players defeated.");
+              handleGameOver(); // Trigger game over state change
           }
       }
+
+      // Helper to transition to Game Over state
+      private void handleGameOver() {
+          if (serverState == ServerState.RUNNING) { // Prevent multiple triggers
+              System.out.println("[Server] Transitioning to GAME_OVER_DISPLAY state.");
+              serverState = ServerState.GAME_OVER_DISPLAY;
+              gameOver = true; // Set logical flag for state object
+              gameOverTime = System.currentTimeMillis();
+          }
+      }
+
+    // --- State Creation & Broadcast ---
+     private GameStateUpdate createWaitingStateUpdate() {
+         GameStateUpdate update = createGameStateUpdate();
+         // Add minimal info, or maybe specific flags indicating waiting?
+         update.invaders = new ArrayList<>();
+         update.playerProjectiles = new ArrayList<>();
+         update.invaderProjectiles = new ArrayList<>();
+         update.barriers = new ArrayList<>();
+         return update;
+    }
+
+    // ... broadcastGameState ...
 } 
